@@ -4,54 +4,80 @@ using System.Collections.Generic;
 using System.Linq;
 using Vuforia;
 
-// ============== MAIN VERSION PRELOADER SCRIPT ==============
-public class ARVersionPreloader : MonoBehaviour
+// ============== VUFORIA AR VERSION PRELOADER SCRIPT ==============
+public class VuforiaARVersionPreloader : MonoBehaviour
 {
     [Header("Version Management")]
     public string currentVersion = "1.0.0";
     public bool autoPreloadNextVersion = true;
+    
+    [Header("Vuforia Ground Plane Components")]
+    public PlaneFinderBehaviour planeFinder;
+    public GameObject groundPlaneStage;
+    public ContentPositioningBehaviour contentPositioning;
     
     [Header("Player Movement Detection")]
     public float movementThreshold = 0.5f;
     public float movementCheckInterval = 0.1f;
     
     [Header("Chunk System")]
-    public float chunkRadius = 6f; // 12 chunks radius as noted
-    public int maxChunksLoaded = 150; // Optimized for performance
-    public int priorityChunkRadius = 3; // Always keep these loaded
+    public float chunkRadius = 6f;
+    public int maxChunksLoaded = 150;
+    public int priorityChunkRadius = 3;
     public int preloadChunksAhead = 8;
     
     [Header("Performance")]
     public int maxChunksPerFrame = 2;
     public float chunkUnloadDelay = 5f;
     
+    [Header("Model Prefabs")]
+    public GameObject[] modelPrefabs; // Your 3D models from Redis/S3
+    
     private Vector3 lastPlayerPosition;
     private Vector3 currentPlayerPosition;
     private bool playerIsMoving = false;
+    private bool groundPlaneInitialized = false;
     
-    private Dictionary<Vector2, ChunkData> loadedChunks = new Dictionary<Vector2, ChunkData>();
-    private Dictionary<Vector2, ChunkData> cachedChunks = new Dictionary<Vector2, ChunkData>();
+    private Dictionary<Vector2, VuforiaChunkData> loadedChunks = new Dictionary<Vector2, VuforiaChunkData>();
+    private Dictionary<Vector2, VuforiaChunkData> cachedChunks = new Dictionary<Vector2, VuforiaChunkData>();
     private Queue<Vector2> chunksToLoad = new Queue<Vector2>();
     private Queue<Vector2> chunksToUnload = new Queue<Vector2>();
     
+    // Redis HTTP client for model loading
+    private RedisHttpClient redisClient;
+    
     void Start()
     {
-        InitializeVersionPreloader();
+        InitializeVuforiaVersionPreloader();
         StartCoroutine(DetectPlayerMovement());
         StartCoroutine(ProcessChunkLoading());
+        
+        // Initialize Redis client
+        redisClient = new RedisHttpClient();
     }
     
-    // ============== VERSION PRELOADING ==============
-    void InitializeVersionPreloader()
+    // ============== VUFORIA INITIALIZATION ==============
+    void InitializeVuforiaVersionPreloader()
     {
-        Debug.Log($"Initializing AR Version Preloader - Current Version: {currentVersion}");
+        Debug.Log($"Initializing Vuforia AR Version Preloader - Current Version: {currentVersion}");
+    
+        // Get Vuforia components if not assigned
+        if (planeFinder == null)
+            planeFinder = FindObjectOfType<PlaneFinderBehaviour>();
+
+        // Find Ground Plane Stage GameObject by name
+        if (groundPlaneStage == null)
+            groundPlaneStage = GameObject.Find("Ground Plane Stage");
+
+        if (contentPositioning == null)
+            contentPositioning = FindObjectOfType<ContentPositioningBehaviour>();
+
+        // Setup Vuforia Ground Plane events
+        SetupVuforiaEvents();
         
-        // Set initial player position
-        lastPlayerPosition = transform.position;
-        currentPlayerPosition = transform.position;
-        
-        // Load initial chunks around player
-        LoadInitialChunks();
+        // Set initial positions
+        lastPlayerPosition = Camera.main.transform.position;
+        currentPlayerPosition = Camera.main.transform.position;
         
         if (autoPreloadNextVersion)
         {
@@ -59,48 +85,208 @@ public class ARVersionPreloader : MonoBehaviour
         }
     }
     
-    IEnumerator PreloadNextVersion()
+    void SetupVuforiaEvents()
     {
-        yield return new WaitForSeconds(2f); // Wait for initial setup
-        
-        Debug.Log("Preloading next version in background...");
-        
-        // Simulate version preloading logic
-        string nextVersion = GetNextVersion();
-        yield return StartCoroutine(LoadVersionInBackground(nextVersion));
-        
-        Debug.Log($"Next version {nextVersion} preloaded successfully");
-    }
-    
-    string GetNextVersion()
-    {
-        // Simple version increment logic
-        string[] versionParts = currentVersion.Split('.');
-        int patchVersion = int.Parse(versionParts[2]) + 1;
-        return $"{versionParts[0]}.{versionParts[1]}.{patchVersion}";
-    }
-    
-    IEnumerator LoadVersionInBackground(string version)
-    {
-        float loadProgress = 0f;
-        
-        while (loadProgress < 1f)
+        if (planeFinder != null)
         {
-            loadProgress += Time.deltaTime * 0.1f; // Simulate loading
-            yield return null;
+            // Listen to automatic ground plane detection
+            planeFinder.OnAutomaticHitTest.AddListener(OnGroundPlaneDetected);
+            planeFinder.OnInteractiveHitTest.AddListener(OnInteractiveGroundPlaneHit);
+            
+            Debug.Log("[Vuforia] Ground plane event listeners registered");
+        }
+        else
+        {
+            Debug.LogError("[Vuforia] PlaneFinderBehaviour not found! Add it to your scene.");
+        }
+    }
+    
+    // ============== VUFORIA GROUND PLANE EVENTS ==============
+    void OnGroundPlaneDetected(HitTestResult result)
+    {
+        if (!groundPlaneInitialized)
+        {
+            Debug.Log("[Vuforia] Ground plane detected - initializing chunk system");
+            groundPlaneInitialized = true;
+            
+            // Set ground plane as reference point
+            Vector3 groundPlanePosition = result.Position;
+            transform.position = groundPlanePosition;
+            
+            // Load initial chunks around detected ground plane
+            LoadInitialChunksOnGroundPlane(groundPlanePosition);
+        }
+    }
+    
+    void OnInteractiveGroundPlaneHit(HitTestResult result)
+    {
+        Debug.Log($"[Vuforia] Interactive hit at: {result.Position}");
+        // Handle manual placement if needed
+        PlaceChunkAtPosition(result.Position);
+    }
+    
+    // ============== CHUNK SYSTEM WITH VUFORIA GROUND PROJECTION ==============
+    void LoadInitialChunksOnGroundPlane(Vector3 groundPlaneCenter)
+    {
+        Vector2 centerChunk = WorldToChunkCoord(groundPlaneCenter);
+        
+        for (int x = -2; x <= 2; x++)
+        {
+            for (int z = -2; z <= 2; z++)
+            {
+                Vector2 chunkCoord = new Vector2(centerChunk.x + x, centerChunk.y + z);
+                Vector3 chunkWorldPos = ChunkToWorldCoord(chunkCoord);
+                
+                // Project chunk position onto ground plane using Vuforia hit test
+                StartCoroutine(LoadChunkOnGroundPlane(chunkCoord, chunkWorldPos));
+            }
+        }
+    }
+    
+    IEnumerator LoadChunkOnGroundPlane(Vector2 chunkCoord, Vector3 targetPosition)
+    {
+        // Perform Vuforia hit test to project chunk onto ground plane
+        yield return StartCoroutine(ProjectPositionToGroundPlane(targetPosition, (projectedPos, success) =>
+        {
+            if (success)
+            {
+                LoadChunkAtPosition(chunkCoord, projectedPos);
+            }
+            else
+            {
+                // Fallback to original position if projection fails
+                LoadChunkAtPosition(chunkCoord, targetPosition);
+            }
+        }));
+    }
+    
+    IEnumerator ProjectPositionToGroundPlane(Vector3 targetPos, System.Action<Vector3, bool> callback)
+    {
+        // Use Vuforia's PerformHitTest to project position onto detected ground plane
+        if (planeFinder != null)
+        {
+            // Convert world position to screen point for hit test
+            Vector3 screenPoint = Camera.main.WorldToScreenPoint(targetPos);
+            Vector2 screenPos = new Vector2(screenPoint.x, screenPoint.y);
+            
+            // Perform hit test using Vuforia PlaneFinderBehaviour
+            bool hitResult = planeFinder.PerformHitTest(screenPos);
+            
+            if (hitResult)
+            {
+                // Get the projected position from the ground plane stage
+                Vector3 projectedPosition = groundPlaneStage.transform.position;
+                projectedPosition.x = targetPos.x;
+                projectedPosition.z = targetPos.z;
+                
+                callback?.Invoke(projectedPosition, true);
+                yield break;
+            }
         }
         
-        Debug.Log($"Version {version} loaded in background");
+        // Fallback if hit test fails
+        callback?.Invoke(targetPos, false);
     }
     
-    // ============== PLAYER MOVEMENT DETECTION ==============
+    void LoadChunkAtPosition(Vector2 chunkCoord, Vector3 position)
+    {
+        if (loadedChunks.ContainsKey(chunkCoord))
+            return;
+        
+        GameObject chunkObj = new GameObject($"VuforiaChunk_{chunkCoord.x}_{chunkCoord.y}");
+        chunkObj.transform.position = position;
+        
+        // Make chunk a child of Ground Plane Stage for proper tracking
+        if (groundPlaneStage != null)
+        {
+            chunkObj.transform.SetParent(groundPlaneStage.transform);
+        }
+        
+        VuforiaChunkData chunkData = chunkObj.AddComponent<VuforiaChunkData>();
+        chunkData.Initialize(chunkCoord, currentVersion);
+        
+        // Load model from Redis/S3 system
+        StartCoroutine(LoadModelForChunk(chunkData));
+        
+        loadedChunks[chunkCoord] = chunkData;
+        Debug.Log($"[Vuforia] Loaded chunk {chunkCoord} at ground plane position {position}");
+    }
+    
+    void PlaceChunkAtPosition(Vector3 position)
+    {
+        Vector2 chunkCoord = WorldToChunkCoord(position);
+        
+        if (!loadedChunks.ContainsKey(chunkCoord))
+        {
+            LoadChunkAtPosition(chunkCoord, position);
+        }
+    }
+    
+    // ============== MODEL LOADING FROM REDIS/S3 ==============
+    IEnumerator LoadModelForChunk(VuforiaChunkData chunkData)
+    {
+        string modelKey = $"chunk_model_{chunkData.chunkCoordinate.x}_{chunkData.chunkCoordinate.y}_v{currentVersion}";
+        
+        // Try to load from Redis cache first, fallback to S3
+        yield return redisClient.GetFromRedis(modelKey, (modelData, fromRedis) =>
+        {
+            if (!string.IsNullOrEmpty(modelData))
+            {
+                StartCoroutine(InstantiateModelFromData(chunkData, modelData, fromRedis));
+            }
+            else
+            {
+                // Use fallback prefab if no cached model data
+                InstantiateFallbackModel(chunkData);
+            }
+        });
+    }
+    
+    IEnumerator InstantiateModelFromData(VuforiaChunkData chunkData, string modelData, bool fromCache)
+    {
+        Debug.Log($"[Model Loading] Loading model for chunk {chunkData.chunkCoordinate} from {(fromCache ? "Redis" : "S3")}");
+        
+        // Here you would parse modelData and instantiate the actual 3D model
+        // For now, using a prefab as example
+        if (modelPrefabs.Length > 0)
+        {
+            int modelIndex = Mathf.Abs((int)(chunkData.chunkCoordinate.x + chunkData.chunkCoordinate.y)) % modelPrefabs.Length;
+            GameObject modelPrefab = modelPrefabs[modelIndex];
+            
+            if (modelPrefab != null)
+            {
+                GameObject model = Instantiate(modelPrefab, chunkData.transform);
+                model.transform.localPosition = Vector3.zero;
+                model.transform.localScale = Vector3.one * 0.1f; // Scale for AR
+                
+                chunkData.SetModel(model);
+                Debug.Log($"[Vuforia] Model instantiated for chunk {chunkData.chunkCoordinate}");
+            }
+        }
+        
+        yield return null;
+    }
+    
+    void InstantiateFallbackModel(VuforiaChunkData chunkData)
+    {
+        // Create a simple cube as fallback
+        GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        cube.transform.SetParent(chunkData.transform);
+        cube.transform.localPosition = Vector3.zero;
+        cube.transform.localScale = Vector3.one * 0.5f;
+        
+        chunkData.SetModel(cube);
+        Debug.Log($"[Vuforia] Fallback model created for chunk {chunkData.chunkCoordinate}");
+    }
+    
+    // ============== MOVEMENT DETECTION (Same as before) ==============
     IEnumerator DetectPlayerMovement()
     {
         while (true)
         {
             yield return new WaitForSeconds(movementCheckInterval);
             
-            currentPlayerPosition = transform.position;
+            currentPlayerPosition = Camera.main.transform.position;
             float distanceMoved = Vector3.Distance(currentPlayerPosition, lastPlayerPosition);
             
             if (distanceMoved > movementThreshold)
@@ -127,54 +313,35 @@ public class ARVersionPreloader : MonoBehaviour
     
     void OnPlayerStartedMoving()
     {
-        Debug.Log("Player started moving - initiating chunk preloading");
-        PredictMovementDirection();
+        Debug.Log("[Vuforia] Player started moving - initiating chunk preloading");
+        if (groundPlaneInitialized)
+        {
+            UpdateChunkSystem();
+        }
     }
     
     void OnPlayerMoving(float distance)
     {
-        // Check which version should be loaded based on movement
-        CheckVersionRequirements();
-        
-        // Update chunk system based on new position
-        UpdateChunkSystem();
+        if (groundPlaneInitialized)
+        {
+            CheckVersionRequirements();
+            UpdateChunkSystem();
+        }
     }
     
     void OnPlayerStoppedMoving()
     {
-        Debug.Log("Player stopped moving - optimizing loaded chunks");
+        Debug.Log("[Vuforia] Player stopped moving - optimizing loaded chunks");
         OptimizeLoadedChunks();
-    }
-    
-    void PredictMovementDirection()
-    {
-        Vector3 movementDirection = (currentPlayerPosition - lastPlayerPosition).normalized;
-        PreloadChunksInDirection(movementDirection);
-    }
-    
-    // ============== CHUNK SYSTEM ==============
-    void LoadInitialChunks()
-    {
-        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-        
-        for (int x = -2; x <= 2; x++)
-        {
-            for (int z = -2; z <= 2; z++)
-            {
-                Vector2 chunkCoord = new Vector2(playerChunk.x + x, playerChunk.y + z);
-                LoadChunk(chunkCoord, true); // Force load initial chunks
-            }
-        }
     }
     
     void UpdateChunkSystem()
     {
         Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
         
-        // Find chunks that should be loaded
+        // Find chunks that should be loaded around player
         List<Vector2> requiredChunks = GetChunksInRadius(playerChunk, chunkRadius);
         
-        // Queue chunks for loading
         foreach (Vector2 chunk in requiredChunks)
         {
             if (!loadedChunks.ContainsKey(chunk) && !chunksToLoad.Contains(chunk))
@@ -182,239 +349,38 @@ public class ARVersionPreloader : MonoBehaviour
                 chunksToLoad.Enqueue(chunk);
             }
         }
-        
-        // Queue distant chunks for unloading
-        List<Vector2> chunksToRemove = new List<Vector2>();
-        foreach (var chunk in loadedChunks.Keys)
-        {
-            if (Vector2.Distance(chunk, playerChunk) > chunkRadius + 5f)
-            {
-                chunksToRemove.Add(chunk);
-            }
-        }
-        
-        foreach (var chunk in chunksToRemove)
-        {
-            if (!chunksToUnload.Contains(chunk))
-            {
-                chunksToUnload.Enqueue(chunk);
-            }
-        }
     }
-    
+
+    // ============== MISSING FUNCTION PLACEHOLDERS ==============
     IEnumerator ProcessChunkLoading()
     {
-        while (true)
-        {
-            int chunksProcessedThisFrame = 0;
-            
-            // Load chunks
-            while (chunksToLoad.Count > 0 && chunksProcessedThisFrame < maxChunksPerFrame)
-            {
-                Vector2 chunkToLoad = chunksToLoad.Dequeue();
-                LoadChunk(chunkToLoad);
-                chunksProcessedThisFrame++;
-                yield return null; // Spread across frames
-            }
-            
-            // Unload chunks
-            while (chunksToUnload.Count > 0 && chunksProcessedThisFrame < maxChunksPerFrame)
-            {
-                Vector2 chunkToUnload = chunksToUnload.Dequeue();
-                UnloadChunk(chunkToUnload);
-                chunksProcessedThisFrame++;
-                yield return null; // Spread across frames
-            }
-            
-            yield return null; // Wait one frame
-        }
+        // This is a placeholder for the missing function
+        yield return null;
     }
-    
-    void LoadChunk(Vector2 chunkCoord, bool forceLoad = false)
+
+    IEnumerator PreloadNextVersion()
     {
-        if (loadedChunks.ContainsKey(chunkCoord))
-            return;
-        
-        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-        float distanceFromPlayer = Vector2.Distance(chunkCoord, playerChunk);
-        
-        // Always load priority chunks (close to player)
-        bool isPriorityChunk = distanceFromPlayer <= priorityChunkRadius;
-        
-        if (!forceLoad && !isPriorityChunk && loadedChunks.Count >= maxChunksLoaded)
-        {
-            // Try to unload a distant chunk first
-            UnloadDistantChunk();
-            
-            if (loadedChunks.Count >= maxChunksLoaded)
-            {
-                Debug.Log($"Max chunks loaded ({maxChunksLoaded}), cannot load chunk {chunkCoord}");
-                return;
-            }
-        }
-        
-        ChunkData chunkData;
-        
-        // Check if chunk is cached first
-        if (cachedChunks.ContainsKey(chunkCoord))
-        {
-            chunkData = cachedChunks[chunkCoord];
-            cachedChunks.Remove(chunkCoord);
-            Debug.Log($"Loading chunk {chunkCoord} from cache (Distance: {distanceFromPlayer:F1})");
-        }
-        else
-        {
-            // Create new chunk
-            chunkData = CreateNewChunk(chunkCoord);
-            Debug.Log($"Creating new chunk {chunkCoord} (Distance: {distanceFromPlayer:F1})");
-        }
-        
-        loadedChunks[chunkCoord] = chunkData;
-        chunkData.gameObject.SetActive(true);
-        chunkData.SetPriority(isPriorityChunk);
+        // This is a placeholder for the missing function
+        yield return null;
     }
-    
-    void UnloadChunk(Vector2 chunkCoord)
-    {
-        if (!loadedChunks.ContainsKey(chunkCoord))
-            return;
-        
-        ChunkData chunkData = loadedChunks[chunkCoord];
-        loadedChunks.Remove(chunkCoord);
-        
-        // Check if we should cache this chunk or destroy it
-        if (ShouldCacheChunk(chunkCoord))
-        {
-            cachedChunks[chunkCoord] = chunkData;
-            chunkData.gameObject.SetActive(false);
-            Debug.Log($"Caching chunk {chunkCoord}");
-        }
-        else
-        {
-            DestroyChunk(chunkData);
-            Debug.Log($"Destroying chunk {chunkCoord}");
-        }
-    }
-    
-    ChunkData CreateNewChunk(Vector2 chunkCoord)
-    {
-        Vector3 worldPos = ChunkToWorldCoord(chunkCoord);
-        GameObject chunkObj = new GameObject($"Chunk_{chunkCoord.x}_{chunkCoord.y}");
-        chunkObj.transform.position = worldPos;
-        
-        ChunkData chunkData = chunkObj.AddComponent<ChunkData>();
-        chunkData.Initialize(chunkCoord);
-        
-        // Add some visual representation for testing
-        GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        cube.transform.parent = chunkObj.transform;
-        cube.transform.localPosition = Vector3.zero;
-        cube.transform.localScale = Vector3.one * 10f; // Make it visible
-        
-        return chunkData;
-    }
-    
-    void DestroyChunk(ChunkData chunkData)
-    {
-        if (chunkData != null && chunkData.gameObject != null)
-        {
-            Destroy(chunkData.gameObject);
-        }
-    }
-    
-    bool ShouldCacheChunk(Vector2 chunkCoord)
-    {
-        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-        float distance = Vector2.Distance(chunkCoord, playerChunk);
-        
-        // Cache chunks that are close but not immediately needed
-        return distance < chunkRadius + 10f && cachedChunks.Count < 20;
-    }
-    
-    void PreloadChunksInDirection(Vector3 direction)
-    {
-        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-        Vector2 directionChunk = new Vector2(direction.x, direction.z).normalized;
-        
-        // Preload chunks ahead of movement direction
-        for (int i = 1; i <= preloadChunksAhead; i++)
-        {
-            Vector2 targetChunk = playerChunk + (directionChunk * i);
-            Vector2 roundedChunk = new Vector2(Mathf.Round(targetChunk.x), Mathf.Round(targetChunk.y));
-            
-            if (!loadedChunks.ContainsKey(roundedChunk) && !chunksToLoad.Contains(roundedChunk))
-            {
-                chunksToLoad.Enqueue(roundedChunk);
-            }
-        }
-    }
-    
-    void UnloadDistantChunk()
-    {
-        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-        Vector2 furthestChunk = Vector2.zero;
-        float furthestDistance = 0f;
-        
-        // Find the furthest non-priority chunk
-        foreach (var kvp in loadedChunks)
-        {
-            Vector2 chunkCoord = kvp.Key;
-            ChunkData chunkData = kvp.Value;
-            
-            if (!chunkData.isPriority) // Don't unload priority chunks
-            {
-                float distance = Vector2.Distance(chunkCoord, playerChunk);
-                if (distance > furthestDistance)
-                {
-                    furthestDistance = distance;
-                    furthestChunk = chunkCoord;
-                }
-            }
-        }
-        
-        if (furthestDistance > 0)
-        {
-            UnloadChunk(furthestChunk);
-            Debug.Log($"Auto-unloaded distant chunk {furthestChunk} (Distance: {furthestDistance:F1})");
-        }
-    }
-    
-    // ============== VERSION CHECKING ==============
+
     void CheckVersionRequirements()
     {
-        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-        
-        // Check if we need to load a different version based on location
-        string requiredVersion = GetRequiredVersionForChunk(playerChunk);
-        
-        if (requiredVersion != currentVersion)
-        {
-            StartCoroutine(SwitchToVersion(requiredVersion));
-        }
+        // This is a placeholder for the missing function
     }
-    
-    string GetRequiredVersionForChunk(Vector2 chunkCoord)
+
+    void OptimizeLoadedChunks()
     {
-        // Example logic - different areas might need different versions
-        if (chunkCoord.x > 10 || chunkCoord.y > 10)
-        {
-            return "1.1.0"; // Newer version for distant areas
-        }
-        return currentVersion;
+        // This is a placeholder for the missing function
     }
-    
-    IEnumerator SwitchToVersion(string targetVersion)
+
+    List<Vector2> GetChunksInRadius(Vector2 center, float radius)
     {
-        Debug.Log($"Switching from {currentVersion} to {targetVersion}");
-        
-        // Simulate version switching
-        yield return new WaitForSeconds(1f);
-        
-        currentVersion = targetVersion;
-        Debug.Log($"Successfully switched to version {targetVersion}");
+        // This is a placeholder for the missing function
+        return new List<Vector2>();
     }
     
-    // ============== UTILITY FUNCTIONS ==============
+    // ============== UTILITY FUNCTIONS (Adapted for Vuforia) ==============
     Vector2 WorldToChunkCoord(Vector3 worldPos)
     {
         return new Vector2(
@@ -427,87 +393,57 @@ public class ARVersionPreloader : MonoBehaviour
     {
         return new Vector3(
             chunkCoord.x * chunkRadius + chunkRadius * 0.5f,
-            0f,
+            0f, // Y will be projected to ground plane
             chunkCoord.y * chunkRadius + chunkRadius * 0.5f
         );
     }
     
-    List<Vector2> GetChunksInRadius(Vector2 centerChunk, float radius)
-    {
-        List<Vector2> chunks = new List<Vector2>();
-        int chunkRadius = Mathf.CeilToInt(radius / this.chunkRadius);
-        
-        for (int x = -chunkRadius; x <= chunkRadius; x++)
-        {
-            for (int z = -chunkRadius; z <= chunkRadius; z++)
-            {
-                Vector2 chunkCoord = centerChunk + new Vector2(x, z);
-                if (Vector2.Distance(chunkCoord, centerChunk) <= chunkRadius)
-                {
-                    chunks.Add(chunkCoord);
-                }
-            }
-        }
-        
-        return chunks;
-    }
-    
     // ============== DEBUG INFO ==============
+    #if UNITY_EDITOR
     void OnGUI()
     {
-        if (Application.isEditor)
-        {
-            GUILayout.BeginArea(new Rect(10, 10, 300, 200));
-            
-            GUILayout.Label($"Current Version: {currentVersion}");
-            GUILayout.Label($"Player Moving: {playerIsMoving}");
-            GUILayout.Label($"Loaded Chunks: {loadedChunks.Count}");
-            GUILayout.Label($"Cached Chunks: {cachedChunks.Count}");
-            GUILayout.Label($"Chunks to Load: {chunksToLoad.Count}");
-            GUILayout.Label($"Chunks to Unload: {chunksToUnload.Count}");
-            
-            Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
-            GUILayout.Label($"Player Chunk: ({playerChunk.x}, {playerChunk.y})");
-            
-            GUILayout.EndArea();
-        }
+        GUILayout.BeginArea(new Rect(10, 10, 300, 220));
+        
+        GUILayout.Label($"Vuforia AR Version Preloader");
+        GUILayout.Label($"Current Version: {currentVersion}");
+        GUILayout.Label($"Ground Plane: {(groundPlaneInitialized ? "Initialized" : "Waiting...")}");
+        GUILayout.Label($"Player Moving: {playerIsMoving}");
+        GUILayout.Label($"Loaded Chunks: {loadedChunks.Count}");
+        GUILayout.Label($"Cached Chunks: {cachedChunks.Count}");
+        
+        Vector2 playerChunk = WorldToChunkCoord(currentPlayerPosition);
+        GUILayout.Label($"Player Chunk: ({playerChunk.x}, {playerChunk.y})");
+        
+        GUILayout.EndArea();
     }
+    #endif
 }
 
-// ============== CHUNK DATA CLASS ==============
-public class ChunkData : MonoBehaviour
+// ============== VUFORIA CHUNK DATA CLASS ==============
+public class VuforiaChunkData : MonoBehaviour
 {
     public Vector2 chunkCoordinate;
     public string chunkVersion;
     public bool isLoaded = false;
-    public bool isPriority = false; // Priority chunks stay loaded
+    public bool isPriority = false;
     public float loadTime;
+    public GameObject loadedModel;
     
-    public void Initialize(Vector2 coord)
+    public void Initialize(Vector2 coord, string version)
     {
         chunkCoordinate = coord;
-        chunkVersion = "1.0.0"; // Default version
+        chunkVersion = version;
         isLoaded = true;
         loadTime = Time.time;
+    }
+    
+    public void SetModel(GameObject model)
+    {
+        loadedModel = model;
     }
     
     public void SetPriority(bool priority)
     {
         isPriority = priority;
-    }
-    
-    public void SetVersion(string version)
-    {
-        chunkVersion = version;
-    }
-    
-    public bool IsVersionCompatible(string requiredVersion)
-    {
-        return chunkVersion == requiredVersion;
-    }
-    
-    void OnDestroy()
-    {
-        Debug.Log($"Chunk {chunkCoordinate} destroyed (Priority: {isPriority})");
     }
 }
