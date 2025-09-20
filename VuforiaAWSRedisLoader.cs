@@ -7,10 +7,14 @@ using UnityEngine.Networking;
 using System.IO;
 
 /// <summary>
-/// Fixed Vuforia + AWS Redis + S3 Model Loader with proper error handling
+/// FULLY FIXED NUCLEAR VERSION: Complete Vuforia + AWS Redis + S3 with Build-Safe API Control
+/// All compiler errors resolved, all features included
 /// </summary>
 public class VuforiaAWSRedisLoader : MonoBehaviour
 {
+    [Header("=== BUILD MODE CONTROL ===")]
+    public bool enableAPICallsInEditor = false; // UNCHECK THIS TO BUILD SUCCESSFULLY
+    
     [Header("=== AWS REDIS CONFIGURATION ===")]
     public string apiBaseUrl = "http://43.205.215.100:5000";
     public string[] availableModelKeys = {"model:temple1", "model:temple2", "model:building1"};
@@ -82,11 +86,21 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         frameCounter++;
     }
     
+    // ============== BUILD-SAFE API CONTROL ==============
+    bool ShouldMakeAPICalls()
+    {
+        #if UNITY_EDITOR
+        return enableAPICallsInEditor && Application.isPlaying;
+        #else
+        return true; // ALWAYS ENABLED IN BUILT APP
+        #endif
+    }
+    
     // ============== SYSTEM INITIALIZATION ==============
     void InitializeSystem()
     {
         Application.targetFrameRate = 60;
-        Debug.Log($"[AWS Redis] Initializing system with local caching");
+        Debug.Log($"[AWS Redis] Initializing - API Calls: {(ShouldMakeAPICalls() ? "ENABLED" : "BUILD-SAFE MODE")}");
         
         InitializeVuforiaComponents();
         
@@ -127,7 +141,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
     }
     
-    // ============== FIXED MODEL LOADING WITH PROPER ERROR HANDLING ==============
+    // ============== SMART MODEL LOADING WITH BUILD PROTECTION ==============
     IEnumerator ProcessModelQueue()
     {
         while (modelLoadQueue.Count > 0)
@@ -135,18 +149,26 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             string modelKey = modelLoadQueue.Dequeue();
             Debug.Log($"[AWS] Processing model: {modelKey}");
             
-            // Check if network is available before making request
-            if (Application.internetReachability == NetworkReachability.NotReachable)
+            if (ShouldMakeAPICalls())
             {
-                Debug.LogWarning($"[AWS] No internet connection - creating fallback for {modelKey}");
-                CreateFallbackModel(modelKey);
+                // Check network connectivity first
+                if (Application.internetReachability == NetworkReachability.NotReachable)
+                {
+                    Debug.LogWarning($"[AWS] No internet connection - creating fallback for {modelKey}");
+                    CreateFallbackModel(modelKey);
+                }
+                else
+                {
+                    yield return StartCoroutine(FetchModelMetadata(modelKey));
+                }
             }
             else
             {
-                yield return StartCoroutine(FetchModelMetadata(modelKey));
+                Debug.Log($"[BUILD MODE] Skipping API call - creating fallback for {modelKey}");
+                CreateFallbackModel(modelKey);
             }
             
-            yield return new WaitForSeconds(1f);
+            yield return new WaitForSeconds(0.5f);
         }
         
         Debug.Log("[AWS] All models processed from queue");
@@ -158,8 +180,8 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         
         using (UnityWebRequest request = UnityWebRequest.Get(url))
         {
-            // CRITICAL: Add timeout to prevent hanging
-            request.timeout = 10;
+            // Short timeout to prevent hanging during builds
+            request.timeout = 8;
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("User-Agent", "Unity-AR-App");
             
@@ -170,25 +192,37 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             {
                 Debug.Log("✅ Metadata response: " + request.downloadHandler.text);
                 
+                Metadata metadataToDownload = null;
+
+                // Parse JSON - NO yield inside try-catch
+                bool parseSuccess = false;
                 try
                 {
-                    // FIXED: Use correct data class name
                     RedisMetadataResponse response = JsonUtility.FromJson<RedisMetadataResponse>(request.downloadHandler.text);
                     
                     if (response.success && response.value != null)
                     {
                         Debug.Log("📦 S3 Path: " + response.value.s3_path);
-                        yield return StartCoroutine(DownloadGLBWithMetadata(key, response.value));
+                        metadataToDownload = response.value;
+                        parseSuccess = true;
                     }
                     else
                     {
                         Debug.LogWarning($"[AWS] API returned failure for {key}");
-                        CreateFallbackModel(key);
                     }
                 }
                 catch (System.Exception e)
                 {
                     Debug.LogError($"[AWS] JSON parsing error: {e.Message}");
+                }
+
+                // Handle result OUTSIDE try-catch
+                if (parseSuccess && metadataToDownload != null)
+                {
+                    yield return StartCoroutine(DownloadGLBWithMetadata(key, metadataToDownload));
+                }
+                else
+                {
                     CreateFallbackModel(key);
                 }
             }
@@ -204,8 +238,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     {
         using (UnityWebRequest www = UnityWebRequest.Get(metadata.s3_path))
         {
-            // CRITICAL: Add timeout for S3 downloads
-            www.timeout = 30;
+            www.timeout = 20;
             
             Debug.Log($"[S3] Downloading: {metadata.s3_path}");
             yield return www.SendWebRequest();
@@ -223,6 +256,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
     }
     
+    // ============== FIXED GLB LOADING - NO TRY-CATCH WITH YIELD ==============
     IEnumerator LoadGLBModel(string modelKey, byte[] glbData, Metadata metadata)
     {
         GameObject modelParent = new GameObject($"StableAWSModel_{modelKey}");
@@ -234,45 +268,60 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         
         var gltf = new GltfImport();
         
-        try
+        // Start the loading task OUTSIDE try-catch
+        var loadTask = gltf.Load(glbData);
+        
+        // Wait for the task to complete (OUTSIDE try-catch)
+        yield return new WaitUntil(() => loadTask.IsCompleted);
+        
+        // Check for exceptions AFTER the yield
+        if (loadTask.IsFaulted)
         {
-            var loadTask = gltf.Load(glbData);
-            yield return new WaitUntil(() => loadTask.IsCompleted);
+            Debug.LogError($"❌ GLB loading exception: {(loadTask.Exception?.InnerException?.Message ?? "Unknown error")}");
+            Destroy(modelParent);
+            CreateFallbackModel(modelKey);
+            yield break;
+        }
+        
+        // Check if loading was successful
+        if (loadTask.Result)
+        {
+            // Start the instantiation task OUTSIDE try-catch
+            var instantiateTask = gltf.InstantiateMainSceneAsync(modelParent.transform);
             
-            if (loadTask.Result)
-            {
-                var instantiateTask = gltf.InstantiateMainSceneAsync(modelParent.transform);
-                yield return new WaitUntil(() => instantiateTask.IsCompleted);
+            // Wait for instantiation to complete (OUTSIDE try-catch)
+            yield return new WaitUntil(() => instantiateTask.IsCompleted);
 
-                Debug.Log("🎉 Model loaded into scene!");
-                
-                ApplyModelMetadata(modelParent, metadata);
-                
-                if (addPhysicsComponents)
-                {
-                    EnsurePhysicsComponents(modelParent);
-                }
-                
-                StableModelData stableData = new StableModelData(modelParent);
-                loadedModels[modelKey] = stableData;
-                
-                if (!groundPlaneInitialized)
-                {
-                    modelParent.SetActive(false);
-                }
-                
-                Debug.Log($"[AWS] Model configured: {modelKey}");
-            }
-            else
+            if (instantiateTask.IsFaulted)
             {
-                Debug.LogError("❌ Failed to load GLB binary data");
+                Debug.LogError($"❌ GLB instantiation exception: {(instantiateTask.Exception?.InnerException?.Message ?? "Unknown error")}");
                 Destroy(modelParent);
                 CreateFallbackModel(modelKey);
+                yield break;
             }
+
+            Debug.Log("🎉 Model loaded into scene!");
+            
+            ApplyModelMetadata(modelParent, metadata);
+            
+            if (addPhysicsComponents)
+            {
+                EnsurePhysicsComponents(modelParent);
+            }
+            
+            StableModelData stableData = new StableModelData(modelParent);
+            loadedModels[modelKey] = stableData;
+            
+            if (!groundPlaneInitialized)
+            {
+                modelParent.SetActive(false);
+            }
+            
+            Debug.Log($"[AWS] Stable model configured: {modelKey}");
         }
-        catch (System.Exception e)
+        else
         {
-            Debug.LogError($"❌ GLB loading exception: {e.Message}");
+            Debug.LogError("❌ Failed to load GLB binary data");
             Destroy(modelParent);
             CreateFallbackModel(modelKey);
         }
@@ -280,11 +329,24 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     
     void CreateFallbackModel(string modelKey)
     {
-        GameObject fallbackModel = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        fallbackModel.name = $"Fallback_{modelKey}";
+        GameObject fallbackModel;
         
-        var renderer = fallbackModel.GetComponent<Renderer>();
-        renderer.material.color = new Color(Random.Range(0.3f, 1f), Random.Range(0.3f, 1f), Random.Range(0.3f, 1f));
+        // Use prefab if available, otherwise create colorful cube
+        if (fallbackPrefabs.Length > 0)
+        {
+            int prefabIndex = Mathf.Abs(modelKey.GetHashCode()) % fallbackPrefabs.Length;
+            fallbackModel = Instantiate(fallbackPrefabs[prefabIndex]);
+            fallbackModel.name = $"StableFallback_{modelKey}";
+        }
+        else
+        {
+            fallbackModel = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            fallbackModel.name = $"StableFallback_{modelKey}";
+            
+            // Make it rainbow so you know it's working
+            var renderer = fallbackModel.GetComponent<Renderer>();
+            renderer.material.color = new Color(Random.Range(0.3f, 1f), Random.Range(0.3f, 1f), Random.Range(0.3f, 1f));
+        }
         
         if (groundPlaneStage != null)
         {
@@ -306,7 +368,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             fallbackModel.SetActive(false);
         }
         
-        Debug.Log($"[Fallback] Created model for {modelKey}");
+        Debug.Log($"[Fallback] Created stable model for {modelKey}");
     }
     
     void ApplyModelMetadata(GameObject model, Metadata metadata)
@@ -378,9 +440,11 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
                 }
             }
         }
+        
+        Debug.Log($"[Physics] Added components to stable {modelObject.name}");
     }
     
-    // ============== STABILITY SYSTEM ==============
+    // ============== COMPLETE STABILITY SYSTEM ==============
     [System.Serializable]
     public class StableModelData
     {
@@ -445,6 +509,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         
         if (positionDrift > stabilityThreshold || rotationDrift > 5f)
         {
+            Debug.Log($"[Stability] Drift detected - Position: {positionDrift:F3}, Rotation: {rotationDrift:F1}°");
             CorrectModelDrift(currentGroundPosition, currentGroundRotation);
             hasUnsavedAnchorData = true;
         }
@@ -472,6 +537,8 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             Vector3 correctedPosition = modelData.anchorPosition + positionDelta;
             correctedPosition = rotationDelta * (correctedPosition - newGroundPosition) + newGroundPosition;
             modelData.UpdateAnchor(correctedPosition, rotationDelta * modelData.anchorRotation);
+            
+            Debug.Log($"[Stability] Corrected drift for {kvp.Key}");
         }
     }
     
@@ -493,12 +560,12 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
     }
     
-    // ============== VUFORIA EVENTS ==============
+    // ============== VUFORIA EVENTS WITH STABILITY ==============
     void OnGroundPlaneDetected(HitTestResult result)
     {
         if (!groundPlaneInitialized)
         {
-            Debug.Log("[Vuforia] Ground plane detected");
+            Debug.Log("[Vuforia] Ground plane detected - initializing stable anchoring");
             groundPlaneInitialized = true;
             hasValidAnchor = true;
             
@@ -537,6 +604,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             modelData.UpdateAnchor(targetPosition, modelData.modelObject.transform.rotation);
             modelData.modelObject.SetActive(true);
             
+            Debug.Log($"[Placement] Stable placement for {kvp.Key}");
             modelIndex++;
         }
     }
@@ -553,6 +621,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             modelToPlace.modelObject.SetActive(true);
             
             currentModelIndex++;
+            Debug.Log($"[Interactive] Placed stable model at {position}");
         }
     }
     
@@ -561,12 +630,14 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         deltaTime += (Time.unscaledDeltaTime - deltaTime) * 0.1f;
     }
     
-    // ============== LOCAL ANCHOR CACHING ==============
+    // ============== COMPLETE LOCAL ANCHOR CACHING ==============
     void InitializeLocalAnchorCache()
     {
         sessionId = System.Guid.NewGuid().ToString().Substring(0, 8);
         string cacheFileName = $"ar_anchors_{sessionId}.json";
         anchorCacheFilePath = Path.Combine(Application.persistentDataPath, cacheFileName);
+        
+        Debug.Log($"[Local Cache] Initialized - File: {anchorCacheFilePath}");
         
         LoadLocalAnchorCache();
         
@@ -582,6 +653,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     {
         Application.focusChanged += OnApplicationFocus;
         Application.quitting += OnApplicationQuitting;
+        Debug.Log("[Local Cache] Cleanup events registered");
     }
     
     void LoadLocalAnchorCache()
@@ -596,6 +668,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             if (anchorData != null)
             {
                 ApplyLocalAnchorData(anchorData);
+                Debug.Log($"✅ [Local Cache] Loaded stable anchor data from file");
             }
         }
         catch (System.Exception e)
@@ -615,7 +688,11 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             lastGroundPlanePosition = anchorData.groundPlanePosition;
             lastGroundPlaneRotation = anchorData.groundPlaneRotation;
             hasValidAnchor = true;
+            
+            Debug.Log($"[Local Cache] Restored stable ground plane: {anchorData.groundPlanePosition}");
         }
+        
+        Debug.Log($"[Local Cache] Applied {anchorData.modelPositions.Count} cached stable positions");
     }
     
     void SaveLocalAnchorCache()
@@ -651,7 +728,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             File.WriteAllText(anchorCacheFilePath, jsonData);
             
             hasUnsavedAnchorData = false;
-            Debug.Log($"💾 [Local Cache] Saved {anchorData.modelPositions.Count} model anchors");
+            Debug.Log($"💾 [Local Cache] Saved {anchorData.modelPositions.Count} stable model anchors");
         }
         catch (System.Exception e)
         {
@@ -675,6 +752,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     {
         if (!hasFocus && enableLocalAnchorCache)
         {
+            Debug.Log("[Local Cache] App lost focus - saving stable anchors");
             SaveLocalAnchorCache();
         }
     }
@@ -686,6 +764,8 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     
     void CleanupOnExit()
     {
+        Debug.Log("[Local Cache] App exiting - cleaning up stable anchor data");
+        
         if (deleteOnAppExit && enableLocalAnchorCache)
         {
             DeleteLocalAnchorCache();
@@ -712,6 +792,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             if (File.Exists(anchorCacheFilePath))
             {
                 File.Delete(anchorCacheFilePath);
+                Debug.Log("🗑️ [Local Cache] Deleted stable anchor cache file on exit");
             }
             
             string cacheDirectory = Application.persistentDataPath;
@@ -722,6 +803,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
                 try
                 {
                     File.Delete(oldFile);
+                    Debug.Log($"🗑️ [Local Cache] Deleted old cache: {Path.GetFileName(oldFile)}");
                 }
                 catch (System.Exception e)
                 {
@@ -735,12 +817,14 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
     }
     
+    // ============== PUBLIC API METHODS ==============
     public void ForceSaveAnchors()
     {
         if (enableLocalAnchorCache)
         {
             hasUnsavedAnchorData = true;
             SaveLocalAnchorCache();
+            Debug.Log("[Local Cache] Force saved stable anchor data");
         }
     }
     
@@ -751,6 +835,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             DeleteLocalAnchorCache();
             hasValidAnchor = false;
             lastGroundPlanePosition = Vector3.zero;
+            Debug.Log("[Local Cache] Manually cleared cached stable anchors");
         }
     }
     
@@ -765,6 +850,24 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
         
         return "No cache file";
+    }
+    
+    public void LoadSpecificModel(string modelKey)
+    {
+        if (!loadedModels.ContainsKey(modelKey))
+        {
+            modelLoadQueue.Enqueue(modelKey);
+            StartCoroutine(ProcessModelQueue());
+        }
+    }
+    
+    public void ToggleModelVisibility(string modelKey)
+    {
+        if (loadedModels.ContainsKey(modelKey))
+        {
+            GameObject model = loadedModels[modelKey].modelObject;
+            model.SetActive(!model.activeInHierarchy);
+        }
     }
     
     void OnDestroy()
@@ -814,17 +917,38 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     #if UNITY_EDITOR
     void OnGUI()
     {
-        GUILayout.BeginArea(new Rect(10, 10, 350, 200));
+        GUILayout.BeginArea(new Rect(10, 10, 350, 280));
         
-        GUILayout.Label($"AR Model Loader (Fixed)");
+        GUILayout.Label($"FULLY FIXED AR Model Loader");
+        GUILayout.Label($"API Calls: {(ShouldMakeAPICalls() ? "ENABLED" : "BUILD-SAFE")}");
         GUILayout.Label($"Ground Plane: {(groundPlaneInitialized ? "Ready" : "Waiting...")}");
-        GUILayout.Label($"Models: {loadedModels.Count}");
+        GUILayout.Label($"Stable Models: {loadedModels.Count}");
         GUILayout.Label($"FPS: {(1.0f / deltaTime):F1}");
         GUILayout.Label($"Internet: {Application.internetReachability}");
+        GUILayout.Label($"Cache: {(enableLocalAnchorCache ? "Enabled" : "Disabled")}");
+        GUILayout.Label($"Unsaved: {hasUnsavedAnchorData}");
+        GUILayout.Label($"{GetCacheInfo()}");
+        
+        GUILayout.Space(10);
+        
+        if (GUILayout.Button("Toggle API Calls"))
+        {
+            enableAPICallsInEditor = !enableAPICallsInEditor;
+        }
         
         if (GUILayout.Button("Test temple1"))
         {
-            modelLoadQueue.Enqueue("model:temple1");
+            LoadSpecificModel("model:temple1");
+        }
+        
+        if (GUILayout.Button("Force Save Cache"))
+        {
+            ForceSaveAnchors();
+        }
+        
+        if (GUILayout.Button("Clear Cache"))
+        {
+            ClearCachedAnchors();
         }
         
         GUILayout.EndArea();
