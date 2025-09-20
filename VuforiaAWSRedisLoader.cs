@@ -579,27 +579,40 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         
         if (request.result == UnityWebRequest.Result.Success)
         {
+            Metadata metadataToDownload = null; // Variable to hold the metadata
+
             try
             {
                 RedisMetadataResponse response = JsonUtility.FromJson<RedisMetadataResponse>(request.downloadHandler.text);
                 
                 if (response.success && response.value != null)
                 {
-                    yield return StartCoroutine(DownloadGLBWithMetadata(key, response.value));
+                    // Assign the metadata instead of yielding here
+                    metadataToDownload = response.value;
                 }
                 else
                 {
-                    CreateFallbackModel(key);
+                    Debug.LogWarning($"[AWS] Metadata response indicates failure for {key}");
                 }
             }
             catch (System.Exception e)
             {
                 Debug.LogError($"[AWS] JSON parsing error: {e.Message}");
+            }
+
+            // Now, outside the try-catch, we can yield
+            if (metadataToDownload != null)
+            {
+                yield return StartCoroutine(DownloadGLBWithMetadata(key, metadataToDownload));
+            }
+            else
+            {
                 CreateFallbackModel(key);
             }
         }
         else
         {
+            Debug.LogError($"[AWS] Error fetching metadata: {request.error}");
             CreateFallbackModel(key);
         }
     }
