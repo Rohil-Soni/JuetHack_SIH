@@ -18,20 +18,20 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     [SerializeField] private GameObject targetGameObject;
     [SerializeField] private float smoothSpeed = 5f;
     [SerializeField] private float driftThreshold = 0.1f;
-    
+
     [Header("=== REDIS CONFIGURATION ===")]
     [SerializeField] private string connectionString = "localhost:6379";
     [SerializeField] private string instanceName = "ARApp";
-    
+
     [Header("=== TRACKING ENHANCEMENT ===")]
     [SerializeField] private ARPlaneManager arPlaneManager;
     [SerializeField] private ARPointCloudManager arPointCloudManager;
     [SerializeField] private ARSessionOrigin arSessionOrigin;
-    
+
     [Header("=== FALLBACK SETTINGS ===")]
     [SerializeField] private float gyroSensitivity = 1f;
     [SerializeField] private float smoothTranslationTime = 0.3f;
-    
+
     [Header("=== PERFORMANCE SETTINGS ===")]
     [SerializeField] private int targetFPS = 60;
     [SerializeField] private bool avoidGarbageCollection = true;
@@ -43,24 +43,24 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     private Vector3 lastKnownPosition;
     private Quaternion lastKnownRotation;
     private bool isTracking = false;
-    
+
     // Redis Connection
     private IDatabase database;
     private ConnectionMultiplexer redis;
-    
+
     // Anchor Management
     private List<AnchorData> anchorPoints = new List<AnchorData>();
-    
+
     // Fallback Tracking
     private Vector3 lastGoodPosition;
     private Quaternion lastGoodRotation;
     private Vector3 velocity;
-    
+
     // Performance Monitoring
     private float deltaTime;
     private string sessionId;
     private Camera arCamera;
-    
+
     // Static Instance for Global Access
     public static StableScript Instance { get; private set; }
     public static bool IsTracking => Instance != null ? Instance.isTracking : false;
@@ -81,15 +81,15 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             return;
         }
     }
-    
+
     private void ConfigureARPlanes()
     {
         if (arPlaneManager != null)
         {
             arPlaneManager.enabled = true;
-            arPlaneManager.requestedDetectionMode = 
+            arPlaneManager.requestedDetectionMode =
                 PlaneDetectionMode.Everything;
-                
+
             Debug.Log("[AR Planes] Configured for full detection mode");
         }
     }
@@ -103,18 +103,18 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         ConfigurePerformanceSettings();
         LoadCachedData();
     }
-    
+
     void Update()
     {
         MonitorPerformance();
         HandleFallbackTracking();
-        
+
         if (avoidGarbageCollection)
         {
             OptimizeMemoryUsage();
         }
     }
-    
+
     void OnDestroy()
     {
         redis?.Dispose();
@@ -126,10 +126,10 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     {
         arCamera = Camera.main;
         sessionId = System.Guid.NewGuid().ToString();
-        
+
         Debug.Log("[AR Stability] Components initialized successfully");
     }
-    
+
     private void InitializeRedis()
     {
         try
@@ -143,7 +143,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Debug.LogError($"[Redis] Connection failed: {ex.Message}");
         }
     }
-    
+
     private void InitializeAR()
     {
         mTrackableBehaviour = GetComponent<TrackableBehaviour>();
@@ -152,25 +152,25 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             mTrackableBehaviour.RegisterTrackableEventHandler(this);
             Debug.Log("[AR] Trackable event handler registered");
         }
-        
+
         ConfigureARPlanes();
         ConfigurePointClouds();
         EnableGyroscope();
     }
-    
+
     private void ConfigurePerformanceSettings()
     {
         Application.targetFrameRate = targetFPS;
         QualitySettings.vSyncCount = 0;
-        
+
         Debug.Log($"[Performance] Target FPS set to {targetFPS}");
     }
-    
+
     private void LoadCachedData()
     {
         LoadAnchorsFromCache();
         LoadLastGoodPositionFromCache();
-        
+
         Debug.Log("[Cache] Loaded cached AR data");
     }
     #endregion
@@ -183,7 +183,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         HandleTrackingState(newStatus);
         Debug.Log($"[AR Tracking] State changed from {previousStatus} to {newStatus}");
     }
-    
+
     private void HandleTrackingState(TrackableBehaviour.Status status)
     {
         if (status == TrackableBehaviour.Status.DETECTED ||
@@ -197,27 +197,27 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             OnTrackingLost();
         }
     }
-    
+
     private void OnTrackingFound()
     {
         isTracking = true;
-        
+
         if (targetGameObject != null)
         {
             targetGameObject.SetActive(true);
         }
-        
+
         // Save current position as anchor
         SaveAnchorData(transform.position, transform.rotation, 1.0f);
         SaveLastGoodPosition(transform.position, transform.rotation);
-        
+
         Debug.Log("[AR Tracking] Target found and tracked");
     }
-    
+
     private void OnTrackingLost()
     {
         isTracking = false;
-        
+
         Debug.Log("[AR Tracking] Target lost - activating fallback mechanisms");
     }
     #endregion
@@ -230,9 +230,9 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         public Quaternion rotation;
         public float confidence;
         public long timestamp;
-        
+
         public AnchorData() { }
-        
+
         public AnchorData(Vector3 pos, Quaternion rot, float conf)
         {
             position = pos;
@@ -241,38 +241,38 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         }
     }
-    
+
     public void SaveAnchorData(Vector3 position, Quaternion rotation, float confidence)
     {
         AnchorData anchor = new AnchorData(position, rotation, confidence);
         anchorPoints.Add(anchor);
-        
+
         // Keep only last 10 anchors for performance
         if (anchorPoints.Count > 10)
         {
             anchorPoints.RemoveAt(0);
         }
-        
+
         // Cache in Redis
         SetAnchorDataInCache("anchor_" + anchor.timestamp, anchor);
-        
+
         Debug.Log($"[Anchor] Saved anchor with confidence: {confidence:F2}");
     }
-    
+
     public AnchorData GetBestAnchor()
     {
         if (anchorPoints.Count == 0) return null;
-        
+
         AnchorData bestAnchor = anchorPoints[0];
         foreach (var anchor in anchorPoints)
         {
             if (anchor.confidence > bestAnchor.confidence)
                 bestAnchor = anchor;
         }
-        
+
         return bestAnchor;
     }
-    
+
     private void LoadAnchorsFromCache()
     {
         try
@@ -304,13 +304,13 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         if (arPlaneManager != null)
         {
             arPlaneManager.enabled = true;
-            arPlaneManager.requestedDetectionMode = 
+            arPlaneManager.requestedDetectionMode =
                 UnityEngine.XR.ARSubsystems.PlaneDetectionMode.Everything;
-                
+
             Debug.Log("[AR Planes] Configured for full detection mode");
         }
     }
-    
+
     private void ConfigurePointClouds()
     {
         if (arPointCloudManager != null)
@@ -319,15 +319,15 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Debug.Log("[AR Point Clouds] Enabled for enhanced tracking");
         }
     }
-    
+
     public void FineTunePlaneSettings()
     {
         if (arPlaneManager == null) return;
-        
+
         // Cache plane data for stability
         var planes = arPlaneManager.trackables;
         List<PlaneData> planeDataList = new List<PlaneData>();
-        
+
         foreach (var plane in planes)
         {
             PlaneData data = new PlaneData
@@ -338,7 +338,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             };
             planeDataList.Add(data);
         }
-        
+
         SetPlaneDataInCache("detected_planes", planeDataList);
         Debug.Log($"[AR Planes] Cached {planeDataList.Count} detected planes");
     }
@@ -357,7 +357,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Debug.LogWarning("[Gyroscope] Not supported on this device");
         }
     }
-    
+
     private void HandleFallbackTracking()
     {
         if (!isTracking && lastGoodPosition != Vector3.zero)
@@ -365,38 +365,38 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             UseInertialTracking();
         }
     }
-    
+
     private void UseInertialTracking()
     {
         if (SystemInfo.supportsGyroscope)
         {
             // Use gyroscope data for rotation
             Quaternion gyroRotation = Input.gyro.attitude;
-            transform.rotation = Quaternion.Slerp(transform.rotation, 
+            transform.rotation = Quaternion.Slerp(transform.rotation,
                 gyroRotation, Time.deltaTime * gyroSensitivity);
         }
-        
+
         // Smooth translation to last known good position
-        transform.position = Vector3.SmoothDamp(transform.position, 
+        transform.position = Vector3.SmoothDamp(transform.position,
             lastGoodPosition, ref velocity, smoothTranslationTime);
     }
-    
+
     public void SaveLastGoodPosition(Vector3 position, Quaternion rotation)
     {
         lastGoodPosition = position;
         lastGoodRotation = rotation;
-        
+
         // Cache the good position
         SetLastGoodPositionInCache(position, rotation);
     }
-    
+
     private void LoadLastGoodPositionFromCache()
     {
         try
         {
             string posData = database.StringGet("lastGoodPosition");
             string rotData = database.StringGet("lastGoodRotation");
-            
+
             if (!string.IsNullOrEmpty(posData) && !string.IsNullOrEmpty(rotData))
             {
                 lastGoodPosition = JsonSerializer.Deserialize<Vector3>(posData);
@@ -415,14 +415,14 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     {
         deltaTime += (Time.unscaledDeltaTime - deltaTime) * 0.1f;
         float currentFPS = 1.0f / deltaTime;
-        
+
         // Cache performance metrics every 5 seconds
         if (Time.time % 5f < Time.deltaTime)
         {
             CachePerformanceMetrics(sessionId, currentFPS, deltaTime);
         }
     }
-    
+
     private void OptimizeMemoryUsage()
     {
         // Limit garbage collection by periodically unloading unused assets
@@ -431,7 +431,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Resources.UnloadUnusedAssets();
         }
     }
-    
+
     private void CachePerformanceMetrics(string sessionId, float fps, float frameTime)
     {
         try
@@ -461,7 +461,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Debug.LogError($"[Redis] Failed to cache anchor data: {ex.Message}");
         }
     }
-    
+
     private AnchorData GetAnchorDataFromCache(string key)
     {
         try
@@ -478,7 +478,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         }
         return null;
     }
-    
+
     // Render Data Caching
     public void SetRenderData(string modelId, RenderData renderData)
     {
@@ -492,7 +492,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Debug.LogError($"[Redis] Failed to cache render data: {ex.Message}");
         }
     }
-    
+
     public RenderData GetRenderData(string modelId)
     {
         try
@@ -509,7 +509,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         }
         return null;
     }
-    
+
     // Plane Detection Data Caching
     private void SetPlaneDataInCache(string key, List<PlaneData> planeData)
     {
@@ -523,7 +523,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             Debug.LogError($"[Redis] Failed to cache plane data: {ex.Message}");
         }
     }
-    
+
     // Position Data Caching
     private void SetLastGoodPositionInCache(Vector3 position, Quaternion rotation)
     {
@@ -531,7 +531,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         {
             string posJson = JsonSerializer.Serialize(position);
             string rotJson = JsonSerializer.Serialize(rotation);
-            
+
             database.StringSet("lastGoodPosition", posJson, TimeSpan.FromHours(1));
             database.StringSet("lastGoodRotation", rotJson, TimeSpan.FromHours(1));
         }
@@ -550,7 +550,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     {
         SaveAnchorData(transform.position, transform.rotation, confidence);
     }
-    
+
     /// <summary>
     /// Force fallback mode for testing
     /// </summary>
@@ -559,7 +559,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         isTracking = false;
         Debug.Log("[AR] Fallback mode activated manually");
     }
-    
+
     /// <summary>
     /// Get current tracking status
     /// </summary>
@@ -567,7 +567,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     {
         return isTracking;
     }
-    
+
     /// <summary>
     /// Clear all cached data
     /// </summary>
@@ -596,7 +596,7 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
         public int materialId;
         public bool isVisible;
     }
-    
+
     [System.Serializable]
     public class PlaneData
     {
@@ -610,7 +610,25 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
     void OnGUI()
     {
         if (!Application.isEditor) return;
-        
+
+        GUI.Box(new Rect(10, 10, 300, 150), "AR Stability Debug");
+        GUI.Label(new Rect(20, 30), $"Tracking: {(isTracking ? "ACTIVE" : "LOST")}");
+        GUI.Label(new Rect(20, 50), $"Anchors: {anchorPoints.Count}");
+        GUI.Label(new Rect(20, 70), $"FPS: {(1.0f / deltaTime):F1}");
+        GUI.Label(new Rect(20, 90), $"Redis: {(database != null ? "Connected" : "Disconnected")}");
+        GUI.Label(new Rect(20, 110), $"Gyro: {(Input.gyro.enabled ? "Enabled" : "Disabled")}");
+
+        if (GUI.Button(new Rect(20, 130, 100, 20), "Clear Cache"))
+        {
+            ClearAllCache();
+        }
+    }
+    #endregion
+    
+    #region Debug and Utilities
+        #if UNITY_EDITOR
+    void OnGUI()
+    {
         GUI.Box(new Rect(10, 10, 300, 150), "AR Stability Debug");
         GUI.Label(new Rect(20, 30), $"Tracking: {(isTracking ? "ACTIVE" : "LOST")}");
         GUI.Label(new Rect(20, 50), $"Anchors: {anchorPoints.Count}");
@@ -623,5 +641,6 @@ public class StableScript : MonoBehaviour, ITrackableEventHandler
             ClearAllCache();
         }
     }
+    #endif
     #endregion
 }
