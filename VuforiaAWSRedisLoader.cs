@@ -8,8 +8,8 @@ using System.IO;
 using System.Net;
 
 /// <summary>
-/// FULLY FIXED NUCLEAR VERSION: Complete Vuforia + AWS Redis + S3 with Build-Safe API Control
-/// All compiler errors resolved, all features included
+/// HERITAGE AR - CORRECTED VERSION with HTTPS + API Key + Proper Scaling
+/// Fixed based on Parnika's feedback
 /// </summary>
 public class VuforiaAWSRedisLoader : MonoBehaviour
 {
@@ -17,7 +17,8 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     public bool enableAPICallsInEditor = false; // UNCHECK THIS TO BUILD SUCCESSFULLY
     
     [Header("=== AWS REDIS CONFIGURATION ===")]
-    public string apiBaseUrl = "http://43.205.215.100:5000";
+    public string apiBaseUrl = "https://heritagear.duckdns.org"; // FIXED - HTTPS + Domain
+    public string apiKey = "temple@1234"; // API KEY FOR AUTHENTICATION
     public string[] availableModelKeys = {"model:temple1", "model:temple2", "model:building1"};
     public bool autoLoadModels = true;
     
@@ -38,8 +39,11 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     public bool deleteOnAppExit = true;
     
     [Header("=== MODEL CONFIGURATION ===")]
-    public float modelScale = 0.1f;
+    public float modelScale = 1f; // BASE SCALE - Redis metadata will override this
     public GameObject[] fallbackPrefabs;
+    
+    [Header("=== DEBUG TESTING ===")]
+    public bool forceTestCubes = false;
     
     [Header("=== PHYSICS CONFIGURATION ===")]
     public bool addPhysicsComponents = true;
@@ -71,11 +75,17 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     
     void Start()
     {
-        // Android HTTPS/HTTP fix
+        // Android HTTPS fix
         #if UNITY_ANDROID && !UNITY_EDITOR
         System.Net.ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
-        Debug.Log("[Android Fix] Enabled insecure HTTP connections");
+        Debug.Log("[Android Fix] Enabled HTTPS certificate bypass");
         #endif
+        
+        if (forceTestCubes)
+        {
+            CreateTestModels();
+            return;
+        }
         
         InitializeSystem();
         StartCoroutine(ProcessModelQueue());
@@ -93,6 +103,25 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         frameCounter++;
     }
     
+    // ============== DEBUG TEST CUBES ==============
+    void CreateTestModels()
+    {
+        Debug.Log("[TEST MODE] Creating test cubes instead of loading models");
+        
+        for (int i = 0; i < 3; i++)
+        {
+            GameObject testCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            testCube.name = $"TestCube_{i}";
+            testCube.transform.position = new Vector3(i * 3f, 1f, 5f);
+            testCube.transform.localScale = Vector3.one * modelScale;
+            
+            var renderer = testCube.GetComponent<Renderer>();
+            renderer.material.color = i == 0 ? Color.red : i == 1 ? Color.green : Color.blue;
+            
+            Debug.Log($"Created test cube {i} at position {testCube.transform.position} with scale {modelScale}");
+        }
+    }
+    
     // ============== BUILD-SAFE API CONTROL ==============
     bool ShouldMakeAPICalls()
     {
@@ -107,7 +136,9 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     void InitializeSystem()
     {
         Application.targetFrameRate = 60;
-        Debug.Log($"[AWS Redis] Initializing - API Calls: {(ShouldMakeAPICalls() ? "ENABLED" : "BUILD-SAFE MODE")}");
+        Debug.Log($"[Heritage AR] Initializing - API Calls: {(ShouldMakeAPICalls() ? "ENABLED" : "BUILD-SAFE MODE")}");
+        Debug.Log($"[Heritage AR] API URL: {apiBaseUrl}");
+        Debug.Log($"[Heritage AR] Model Scale: {modelScale}");
         
         InitializeVuforiaComponents();
         
@@ -148,19 +179,19 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
     }
     
-    // ============== SMART MODEL LOADING WITH BUILD PROTECTION ==============
+    // ============== SMART MODEL LOADING ==============
     IEnumerator ProcessModelQueue()
     {
         while (modelLoadQueue.Count > 0)
         {
             string modelKey = modelLoadQueue.Dequeue();
-            Debug.Log($"[AWS] Processing model: {modelKey}");
+            Debug.Log($"[Heritage AR] Processing model: {modelKey}");
             
             if (ShouldMakeAPICalls())
             {
                 if (Application.internetReachability == NetworkReachability.NotReachable)
                 {
-                    Debug.LogWarning($"[AWS] No internet connection - creating fallback for {modelKey}");
+                    Debug.LogWarning($"[Heritage AR] No internet connection - creating fallback for {modelKey}");
                     CreateFallbackModel(modelKey);
                 }
                 else
@@ -177,45 +208,76 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             yield return new WaitForSeconds(0.5f);
         }
         
-        Debug.Log("[AWS] All models processed from queue");
+        Debug.Log("[Heritage AR] All models processed from queue");
     }
     
-    // ============== FIXED - NO DUPLICATE CODE ==============
+    // ============== API DEBUG METHODS ==============
+    public void DebugAPIStatus()
+    {
+        Debug.Log($"API Calls Enabled: {ShouldMakeAPICalls()}");
+        Debug.Log($"Internet: {Application.internetReachability}");
+        Debug.Log($"API URL: {apiBaseUrl}");
+        Debug.Log($"API Key: {apiKey}");
+        
+        StartCoroutine(TestAPI());
+    }
+
+    IEnumerator TestAPI()
+    {
+        string testUrl = apiBaseUrl + "/get/model:temple1";
+        using (UnityWebRequest request = UnityWebRequest.Get(testUrl))
+        {
+            // FIXED - ADD API KEY HEADER
+            request.SetRequestHeader("X-API-Key", apiKey);
+            yield return request.SendWebRequest();
+            
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                Debug.Log("✅ Heritage AR API Working: " + request.downloadHandler.text);
+            }
+            else
+            {
+                Debug.Log("❌ Heritage AR API Failed: " + request.error);
+                Debug.Log("❌ Response Code: " + request.responseCode);
+            }
+        }
+    }
+    
+    // ============== CORRECTED API FETCH WITH HTTPS + API KEY ==============
     IEnumerator FetchModelMetadata(string key)
     {
         string url = apiBaseUrl + "/get/" + key;
         
         using (UnityWebRequest request = UnityWebRequest.Get(url))
         {
-            // Enhanced Android/Build Settings
-            request.timeout = 10;
-            request.SetRequestHeader("User-Agent", "Unity-AR-App/1.0");
+            // Enhanced headers with API KEY
+            request.timeout = 15; // Increased for HTTPS
+            request.SetRequestHeader("User-Agent", "Unity-HeritageAR-App/1.0");
             request.SetRequestHeader("Accept", "application/json");
             request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("X-API-Key", apiKey); // FIXED - API KEY ADDED
             
-            // Allow insecure connections for Android
+            // HTTPS certificate handler for Android
             #if UNITY_ANDROID && !UNITY_EDITOR
             request.certificateHandler = new AcceptAllCertificatesHandler();
             #endif
             
-            // Enhanced Debug Logging
-            Debug.Log($"[Build Debug] Requesting: {url}");
-            Debug.Log($"[Build Debug] Internet Status: {Application.internetReachability}");
-            Debug.Log($"[Build Debug] Platform: {Application.platform}");
+            Debug.Log($"[Heritage AR] Requesting: {url}");
+            Debug.Log($"[Heritage AR] Using API Key: {apiKey}");
+            Debug.Log($"[Heritage AR] Internet Status: {Application.internetReachability}");
             
             yield return request.SendWebRequest();
             
-            // Detailed Response Logging
-            Debug.Log($"[Build Debug] Response Code: {request.responseCode}");
-            Debug.Log($"[Build Debug] Result: {request.result}");
+            Debug.Log($"[Heritage AR] Response Code: {request.responseCode}");
+            Debug.Log($"[Heritage AR] Result: {request.result}");
             if (!string.IsNullOrEmpty(request.error))
             {
-                Debug.Log($"[Build Debug] Error Details: {request.error}");
+                Debug.Log($"[Heritage AR] Error Details: {request.error}");
             }
             
             if (request.result == UnityWebRequest.Result.Success)
             {
-                Debug.Log("✅ [Build Debug] Raw Response: " + request.downloadHandler.text);
+                Debug.Log("✅ [Heritage AR] Raw Response: " + request.downloadHandler.text);
                 
                 Metadata metadataToDownload = null;
                 bool parseSuccess = false;
@@ -227,18 +289,19 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
                     if (response.success && response.value != null)
                     {
                         Debug.Log("📦 S3 Path: " + response.value.s3_path);
+                        Debug.Log($"📏 Scale from Redis: {response.value.scale}");
                         metadataToDownload = response.value;
                         parseSuccess = true;
                     }
                     else
                     {
-                        Debug.LogWarning($"[AWS] API returned failure for {key}");
+                        Debug.LogWarning($"[Heritage AR] API returned failure for {key}");
                     }
                 }
                 catch (System.Exception e)
                 {
-                    Debug.LogError($"[AWS] JSON parsing error: {e.Message}");
-                    Debug.LogError($"[AWS] Raw response was: {request.downloadHandler.text}");
+                    Debug.LogError($"[Heritage AR] JSON parsing error: {e.Message}");
+                    Debug.LogError($"[Heritage AR] Raw response was: {request.downloadHandler.text}");
                 }
 
                 if (parseSuccess && metadataToDownload != null)
@@ -252,7 +315,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             }
             else
             {
-                Debug.LogError($"❌ [Build Debug] API failed for {key}");
+                Debug.LogError($"❌ [Heritage AR] API failed for {key}");
                 Debug.LogError($"   Response Code: {request.responseCode}");
                 Debug.LogError($"   Error: {request.error}");
                 Debug.LogError($"   URL: {url}");
@@ -261,46 +324,99 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         }
     }
     
+    // ============== GLB DOWNLOAD WITH HTTPS SUPPORT ==============
     IEnumerator DownloadGLBWithMetadata(string modelKey, Metadata metadata)
     {
         using (UnityWebRequest www = UnityWebRequest.Get(metadata.s3_path))
         {
-            www.timeout = 20;
+            www.timeout = 60;
             
             #if UNITY_ANDROID && !UNITY_EDITOR
             www.certificateHandler = new AcceptAllCertificatesHandler();
             #endif
             
-            Debug.Log($"[S3] Downloading: {metadata.s3_path}");
-            yield return www.SendWebRequest();
+            www.downloadHandler = new DownloadHandlerBuffer();
+            
+            Debug.Log($"[S3] Starting download: {metadata.s3_path}");
+            
+            var operation = www.SendWebRequest();
+            
+            while (!operation.isDone)
+            {
+                float progress = www.downloadProgress;
+                if (progress > 0)
+                {
+                    Debug.Log($"[S3] Download progress: {progress:P2}");
+                }
+                yield return null;
+            }
             
             if (www.result == UnityWebRequest.Result.Success)
             {
-                Debug.Log("✅ Downloaded GLB, size: " + www.downloadHandler.data.Length);
-                yield return StartCoroutine(LoadGLBModel(modelKey, www.downloadHandler.data, metadata)); // FIXED - NO MARKDOWN LINK
+                byte[] data = www.downloadHandler.data; // FIXED - NO MARKDOWN LINK
+                Debug.Log($"✅ Downloaded GLB successfully - Size: {data.Length} bytes");
+                
+                if (data.Length > 0 && IsValidGLBData(data))
+                {
+                    yield return StartCoroutine(LoadGLBModel(modelKey, data, metadata));
+                }
+                else
+                {
+                    Debug.LogError("❌ Downloaded GLB data is corrupted or invalid");
+                    CreateFallbackModel(modelKey);
+                }
             }
             else
             {
                 Debug.LogError($"❌ S3 Download Error: {www.error}");
+                Debug.LogError($"❌ Response Code: {www.responseCode}");
                 CreateFallbackModel(modelKey);
             }
         }
     }
     
-    // ============== FIXED GLB LOADING ==============
+    bool IsValidGLBData(byte[] data)
+    {
+        if (data.Length < 12) return false;
+        
+        string magic = System.Text.Encoding.ASCII.GetString(data, 0, 4);
+        return magic == "glTF";
+    }
+    
+    // ============== GLB LOADING ==============
     IEnumerator LoadGLBModel(string modelKey, byte[] glbData, Metadata metadata)
     {
-        GameObject modelParent = new GameObject($"StableAWSModel_{modelKey}");
+        GameObject modelParent = new GameObject($"HeritageAR_{modelKey}");
         
         if (groundPlaneStage != null)
         {
             modelParent.transform.SetParent(groundPlaneStage.transform);
         }
         
+        System.GC.Collect();
+        
         var gltf = new GltfImport();
+        
+        Debug.Log($"[GLB] Starting GLB import for {modelKey} - Size: {glbData.Length} bytes");
+        
         var loadTask = gltf.Load(glbData);
         
-        yield return new WaitUntil(() => loadTask.IsCompleted);
+        float timeout = 30f;
+        float elapsed = 0f;
+        
+        while (!loadTask.IsCompleted && elapsed < timeout)
+        {
+            elapsed += Time.unscaledDeltaTime;
+            yield return null;
+        }
+        
+        if (elapsed >= timeout)
+        {
+            Debug.LogError($"❌ GLB loading timeout for {modelKey}");
+            Destroy(modelParent);
+            CreateFallbackModel(modelKey);
+            yield break;
+        }
         
         if (loadTask.IsFaulted)
         {
@@ -312,7 +428,10 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         
         if (loadTask.Result)
         {
+            Debug.Log($"✅ GLB loaded successfully, instantiating {modelKey}");
+            
             var instantiateTask = gltf.InstantiateMainSceneAsync(modelParent.transform);
+            
             yield return new WaitUntil(() => instantiateTask.IsCompleted);
 
             if (instantiateTask.IsFaulted)
@@ -323,7 +442,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
                 yield break;
             }
 
-            Debug.Log("🎉 Model loaded into scene!");
+            Debug.Log("🎉 Heritage AR Model loaded and instantiated successfully!");
             
             ApplyModelMetadata(modelParent, metadata);
             
@@ -340,7 +459,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
                 modelParent.SetActive(false);
             }
             
-            Debug.Log($"[AWS] Stable model configured: {modelKey}");
+            Debug.Log($"[Heritage AR] Model {modelKey} configured and ready");
         }
         else
         {
@@ -358,12 +477,12 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         {
             int prefabIndex = Mathf.Abs(modelKey.GetHashCode()) % fallbackPrefabs.Length;
             fallbackModel = Instantiate(fallbackPrefabs[prefabIndex]);
-            fallbackModel.name = $"StableFallback_{modelKey}";
+            fallbackModel.name = $"HeritageFallback_{modelKey}";
         }
         else
         {
             fallbackModel = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            fallbackModel.name = $"StableFallback_{modelKey}";
+            fallbackModel.name = $"HeritageFallback_{modelKey}";
             
             var renderer = fallbackModel.GetComponent<Renderer>();
             renderer.material.color = new Color(Random.Range(0.3f, 1f), Random.Range(0.3f, 1f), Random.Range(0.3f, 1f));
@@ -374,7 +493,9 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             fallbackModel.transform.SetParent(groundPlaneStage.transform);
         }
         
-        fallbackModel.transform.localScale = Vector3.one * modelScale;
+        // FIXED - RESPECT BASE modelScale SETTING
+        float scale = modelScale; // Use base scale for fallbacks
+        fallbackModel.transform.localScale = Vector3.one * scale;
         
         if (addPhysicsComponents)
         {
@@ -389,20 +510,26 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             fallbackModel.SetActive(false);
         }
         
-        Debug.Log($"[Fallback] Created stable model for {modelKey}");
+        Debug.Log($"[Fallback] Created Heritage AR fallback for {modelKey} with scale {scale}");
     }
     
+    // ============== FIXED - RESPECT REDIS METADATA SCALE ==============
     void ApplyModelMetadata(GameObject model, Metadata metadata)
     {
-        float scale = modelScale;
+        // FIXED - Start with base scale, then respect Redis metadata
+        float scale = modelScale; // Default base scale
+        
         if (!string.IsNullOrEmpty(metadata.scale))
         {
             if (float.TryParse(metadata.scale, out float metadataScale))
             {
-                scale = metadataScale;
+                scale = metadataScale; // Respect Redis metadata scale
+                Debug.Log($"[Heritage AR] Using Redis scale: {metadataScale} for {model.name}");
             }
         }
+        
         model.transform.localScale = Vector3.one * scale;
+        Debug.Log($"[Model Scale] Applied scale {scale} to {model.name}");
         
         if (!string.IsNullOrEmpty(metadata.rotation))
         {
@@ -414,6 +541,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
                     float.TryParse(rotationParts[2], out float z))
                 {
                     model.transform.localRotation = Quaternion.Euler(x, y, z);
+                    Debug.Log($"[Heritage AR] Applied rotation: {x},{y},{z} to {model.name}");
                 }
             }
         }
@@ -581,7 +709,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     {
         if (!groundPlaneInitialized)
         {
-            Debug.Log("[Vuforia] Ground plane detected");
+            Debug.Log("[Vuforia] Ground plane detected - Heritage AR ready");
             groundPlaneInitialized = true;
             hasValidAnchor = true;
             
@@ -606,20 +734,21 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     void PlaceLoadedModelsOnGroundPlane(Vector3 groundPlanePosition)
     {
         int modelIndex = 0;
-        float spacing = 2f;
+        float spacing = 3f;
         
         foreach (var kvp in loadedModels)
         {
             StableModelData modelData = kvp.Value;
             
             float angle = (modelIndex * 360f / loadedModels.Count) * Mathf.Deg2Rad;
-            Vector3 offset = new Vector3(Mathf.Cos(angle) * spacing, 0, Mathf.Sin(angle) * spacing);
+            Vector3 offset = new Vector3(Mathf.Cos(angle) * spacing, 0.1f, Mathf.Sin(angle) * spacing);
             Vector3 targetPosition = groundPlanePosition + offset;
             
             modelData.modelObject.transform.position = targetPosition;
             modelData.UpdateAnchor(targetPosition, modelData.modelObject.transform.rotation);
             modelData.modelObject.SetActive(true);
             
+            Debug.Log($"[Placement] Heritage AR placed {kvp.Key} at {targetPosition}");
             modelIndex++;
         }
     }
@@ -636,6 +765,7 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             modelToPlace.modelObject.SetActive(true);
             
             currentModelIndex++;
+            Debug.Log($"[Interactive] Heritage AR placed model at {position}");
         }
     }
     
@@ -644,11 +774,11 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         deltaTime += (Time.unscaledDeltaTime - deltaTime) * 0.1f;
     }
     
-    // ============== LOCAL ANCHOR CACHING (SIMPLIFIED) ==============
+    // ============== LOCAL ANCHOR CACHING ==============
     void InitializeLocalAnchorCache()
     {
         sessionId = System.Guid.NewGuid().ToString().Substring(0, 8);
-        string cacheFileName = $"ar_anchors_{sessionId}.json";
+        string cacheFileName = $"heritage_ar_anchors_{sessionId}.json";
         anchorCacheFilePath = Path.Combine(Application.persistentDataPath, cacheFileName);
         
         if (autoSaveCoroutine == null)
@@ -805,12 +935,12 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
         public string description;
     }
     
-    // ============== CERTIFICATE HANDLER (INSIDE CLASS) ==============
+    // ============== CERTIFICATE HANDLER ==============
     public class AcceptAllCertificatesHandler : CertificateHandler
     {
         protected override bool ValidateCertificate(byte[] certificateData)
         {
-            return true; // Accept all certificates for HTTP/HTTPS in Android builds
+            return true; // Accept all HTTPS certificates for Android builds
         }
     }
     
@@ -818,14 +948,17 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
     #if UNITY_EDITOR
     void OnGUI()
     {
-        GUILayout.BeginArea(new Rect(10, 10, 350, 280));
+        GUILayout.BeginArea(new Rect(10, 10, 450, 400));
         
-        GUILayout.Label($"FULLY FIXED AR Model Loader");
+        GUILayout.Label($"HERITAGE AR - Model Loader");
+        GUILayout.Label($"API URL: {apiBaseUrl}");
+        GUILayout.Label($"API Key: {apiKey}");
         GUILayout.Label($"API Calls: {(ShouldMakeAPICalls() ? "ENABLED" : "BUILD-SAFE")}");
         GUILayout.Label($"Ground Plane: {(groundPlaneInitialized ? "Ready" : "Waiting...")}");
-        GUILayout.Label($"Stable Models: {loadedModels.Count}");
+        GUILayout.Label($"Models: {loadedModels.Count}");
         GUILayout.Label($"FPS: {(1.0f / deltaTime):F1}");
         GUILayout.Label($"Internet: {Application.internetReachability}");
+        GUILayout.Label($"Model Scale: {modelScale}");
         
         GUILayout.Space(10);
         
@@ -834,9 +967,19 @@ public class VuforiaAWSRedisLoader : MonoBehaviour
             enableAPICallsInEditor = !enableAPICallsInEditor;
         }
         
+        if (GUILayout.Button("Test Heritage AR API"))
+        {
+            DebugAPIStatus();
+        }
+        
         if (GUILayout.Button("Test temple1"))
         {
             LoadSpecificModel("model:temple1");
+        }
+        
+        if (GUILayout.Button("Force Test Cubes"))
+        {
+            forceTestCubes = !forceTestCubes;
         }
         
         GUILayout.EndArea();
