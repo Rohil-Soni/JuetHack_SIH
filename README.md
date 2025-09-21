@@ -1,6 +1,6 @@
 # JuetHack_SIH
 Unity AR Model Loader with AWS S3 & Redis
-[![Unity](https://img.shields.io/badge/Unity-2022.3.62f1-black?ps://img.shields.io![Android](https://img.shields.io/badge/Platform-Android-green?logo=t dynamically loads 3D models from AWS S3 using Redis caching and Vuforia ground plane detection. Built for SIH 2025 hackathon project.
+[![Unity](https://img.shields.io/badge/Unity-2022.3.62f1-black?ps://img.shields.io![Android](https://img.shields.io/badge/Platform-Android-green?logo=t))] dynamically loads 3D models from AWS S3 using Redis caching and Vuforia ground plane detection. Built for SIH 2025 hackathon project.
 
 🚀 Features
 Core Functionality
